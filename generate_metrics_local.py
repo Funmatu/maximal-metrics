@@ -13,11 +13,11 @@ WORKSPACE_DIR = "./github_workspace"
 OUTPUT_SVG = "my_full_metrics.svg"
 
 # 並列数の最適化
-# ネットワークは待ちが多いので多めに、解析はCPUコア数に依存
 NETWORK_WORKERS = 32
 ANALYSIS_WORKERS = os.cpu_count() or 4
 
-# 言語定義
+# 言語定義とカラーコード
+# Robotics系は視認性を高めるため、関連する色相（紫・青・橙）でグループ化
 LANG_COLORS = {
     "Python": "#3572A5",
     "Rust": "#dea584",
@@ -64,9 +64,25 @@ LANG_COLORS = {
     "Assembly": "#6E4C13",
     "Julia": "#a270ba",
     "R": "#198CE7",
+    # --- 新規追加カラー ---
+    "Robotics (Launch)": "#8e44ad",  # Deep Purple
+    "Robotics (Xacro)": "#9b59b6",  # Purple
+    "Robotics (URDF)": "#884ea0",  # Dark Purple
+    "Robotics (ROS Msg)": "#2980b9",  # Strong Blue
+    "Robotics (ROS Srv)": "#3498db",  # Blue
+    "Robotics (ROS Action)": "#1abc9c",  # Teal
+    "Robotics (SRDF)": "#16a085",  # Dark Teal
+    "Robotics (Gazebo World)": "#d35400",  # Pumpkin
+    "Robotics (Config)": "#e67e22",  # Carrot
+    "Cython": "#f1c40f",  # Gold
+    "Qt UI (XML)": "#41cd52",  # Qt Green
+    "Qt Resource": "#2ecc71",  # Emerald
+    "GraphQL": "#e10098",  # Brand Pink
+    "Google Apps Script": "#4285f4",  # Google Blue
 }
 DEFAULT_COLOR = "#ededed"
 
+# 集計対象ホワイトリスト
 EXTENSIONS = {
     ".rs": "Rust",
     ".c": "C",
@@ -133,6 +149,56 @@ EXTENSIONS = {
     ".markdown": "Markdown",
     ".tex": "TeX",
     ".rst": "reStructuredText",
+    # --- Robotics / ROS / R&D Specific ---
+    ".launch": "Robotics (Launch)",
+    ".xacro": "Robotics (Xacro)",
+    ".urdf": "Robotics (URDF)",
+    ".msg": "Robotics (ROS Msg)",
+    ".srv": "Robotics (ROS Srv)",
+    ".action": "Robotics (ROS Action)",
+    ".srdf": "Robotics (SRDF)",
+    ".world": "Robotics (Gazebo World)",
+    ".cfg": "Robotics (Config)",
+    # --- Advanced Coding ---
+    ".pyx": "Cython",
+    ".ui": "Qt UI (XML)",
+    ".qrc": "Qt Resource",
+    # --- Web / Templates ---
+    ".ejs": "JavaScript",
+    ".graphql": "GraphQL",
+    ".gs": "Google Apps Script",
+}
+
+# 拡張子ベースの強力な除外リスト（ノイズ除去）
+IGNORE_EXTENSIONS = {
+    ".ply",
+    ".pcd",
+    ".obj",
+    ".stl",
+    ".dae",  # 3D Data
+    ".csv",
+    ".tsv",
+    ".txt",
+    ".log",
+    ".back",
+    ".bak",
+    ".old",
+    ".inc",  # Text Data / Backups
+    ".svg",
+    ".eps",
+    ".png",
+    ".jpg",
+    ".jpeg",  # Images
+    ".ipynb",
+    ".rviz",
+    ".uxf",
+    ".drawio",  # Tool Generated Configs
+    ".geojson",
+    ".map",
+    ".seqmap",  # Map Data
+    ".lock",
+    ".dcf",
+    ".back2",  # Lock files & Misc
 }
 
 SPECIAL_FILENAMES = {
@@ -172,7 +238,6 @@ IGNORE_PATTERNS = [
 
 def run_cmd(cmd, cwd=None):
     try:
-        # errors='replace' でエンコーディングエラーによるクラッシュを完全回避
         res = subprocess.run(
             cmd,
             cwd=cwd,
@@ -205,10 +270,8 @@ def sync_repo_task(repo):
     repo_path = os.path.join(WORKSPACE_DIR, repo_name + ".git")
 
     if os.path.exists(repo_path):
-        # 既存なら更新
         run_cmd(["git", "remote", "update"], cwd=repo_path)
     else:
-        # 新規なら Mirror Clone (全てのブランチ、タグ、Refを複製)
         run_cmd(["git", "clone", "--mirror", repo["sshUrl"], repo_path])
 
     return repo_name, repo_path
@@ -217,15 +280,14 @@ def sync_repo_task(repo):
 def count_lines_all_refs(repo_path):
     """全ローカルブランチを対象に集計"""
     stats = defaultdict(int)
+    other_breakdown = defaultdict(int)
 
-    # refs/heads/ 以下にある全てのブランチ名を取得
-    # --mirror を使っているため、リモートのブランチが全てここにコピーされている
     res = run_cmd(
         ["git", "for-each-ref", "--format=%(refname:short)", "refs/heads/"],
         cwd=repo_path,
     )
     if not res:
-        return stats
+        return stats, other_breakdown
 
     branches = res.split("\n")
 
@@ -233,43 +295,58 @@ def count_lines_all_refs(repo_path):
         if not branch:
             continue
 
-        # git grep execution
+        # git grep execution (-I でバイナリ除外)
         grep_res = run_cmd(["git", "grep", "-I", "-c", "", branch], cwd=repo_path)
         if not grep_res:
             continue
 
         for line in grep_res.split("\n"):
-            # 出力例: branch_name:path/to/file:count
-            # 右側から分割することで、ブランチ名に区切り文字が含まれていても安全に処理
             try:
                 rest, count_str = line.rsplit(":", 1)
-
-                # ブランチ名プレフィックスを除去してファイルパスを抽出
-                # branch変数をそのまま使うより、grep出力形式に合わせる
                 prefix = f"{branch}:"
                 if rest.startswith(prefix):
                     file_path = rest[len(prefix) :]
                 else:
-                    continue  # パース失敗時はスキップ
+                    continue
 
+                # ディレクトリ除外パターン
                 if any(ign in file_path for ign in IGNORE_PATTERNS):
                     continue
 
+                # クォート等のゴミ除去（超重要）
+                file_path = file_path.strip().strip('"').strip("'")
                 filename = os.path.basename(file_path)
                 _, ext = os.path.splitext(filename)
-                lang = None
+                ext_lower = ext.lower()
 
+                # 拡張子ブラックリスト（ノイズ除去）
+                if ext_lower in IGNORE_EXTENSIONS:
+                    continue
+
+                lang = None
+                lines = int(count_str)
+
+                # 1. 特殊ファイル名
                 if filename in SPECIAL_FILENAMES:
                     lang = SPECIAL_FILENAMES[filename]
-                elif ext.lower() in EXTENSIONS:
-                    lang = EXTENSIONS[ext.lower()]
+                # 2. 定義済み拡張子（ホワイトリスト）
+                elif ext_lower in EXTENSIONS:
+                    lang = EXTENSIONS[ext_lower]
+                # 3. 未定義（Other）
+                else:
+                    # ここで `stats` には加算しない（グラフに出さない）
+                    # ただし、確認用に `other_breakdown` には記録する
+                    key = ext_lower if ext_lower else "(no extension)"
+                    other_breakdown[key] += lines
+                    continue
 
                 if lang:
-                    stats[lang] += int(count_str)
+                    stats[lang] += lines
+
             except ValueError:
                 continue
 
-    return stats
+    return stats, other_breakdown
 
 
 def generate_svg(total_stats, filename):
@@ -322,16 +399,15 @@ def main():
     repos = fetch_all_repos()
     print(f"📦 Found {len(repos)} repositories.")
 
-    # 1. 同期フェーズ (Network Bound)
     print(f"🔄 Mirroring repositories (Workers: {NETWORK_WORKERS})...")
     with ThreadPoolExecutor(max_workers=NETWORK_WORKERS) as executor:
         futures = [executor.submit(sync_repo_task, r) for r in repos]
         for _ in as_completed(futures):
             pass
 
-    # 2. 解析フェーズ (CPU Bound)
     print(f"🔍 Analyzing ALL branches (Workers: {ANALYSIS_WORKERS})...")
     total_stats = defaultdict(int)
+    total_other_breakdown = defaultdict(int)
 
     with ThreadPoolExecutor(max_workers=ANALYSIS_WORKERS) as executor:
         future_to_repo = {
@@ -344,17 +420,30 @@ def main():
         done = 0
         for future in as_completed(future_to_repo):
             try:
-                stats = future.result()
+                stats, other_details = future.result()
                 for l, c in stats.items():
                     total_stats[l] += c
+
+                for ext, c in other_details.items():
+                    total_other_breakdown[ext] += c
+
             except Exception as e:
                 print(f"⚠️ Error: {e}")
             done += 1
             print(f"   [{done}/{len(repos)}] Analyzed...", end="\r")
 
-    print("\n\n=== 📊 FINAL TOTALS (ALL BRANCHES) ===")
+    print("\n\n=== 📊 FINAL TOTALS (ALL BRANCHES - Valid Code Only) ===")
     for lang, count in sorted(total_stats.items(), key=lambda x: x[1], reverse=True):
-        print(f"{lang:<15}: {count:>12,}")
+        print(f"{lang:<20}: {count:>12,}")
+
+    # 集計からは除外されているが、何が捨てられたかを確認するためのログ
+    print("\n\n=== 🗑️ IGNORED FILES (Noise / Not in Whitelist) ===")
+    print("These are excluded from the stats above.")
+    sorted_others = sorted(
+        total_other_breakdown.items(), key=lambda x: x[1], reverse=True
+    )
+    for ext, count in sorted_others[:50]:
+        print(f"{ext:<20}: {count:>12,}")
 
     generate_svg(total_stats, OUTPUT_SVG)
     print(f"\n✅ Done! Saved to {os.path.abspath(OUTPUT_SVG)}")
