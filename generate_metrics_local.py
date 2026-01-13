@@ -167,6 +167,9 @@ EXTENSIONS = {
     ".ejs": "JavaScript",
     ".graphql": "GraphQL",
     ".gs": "Google Apps Script",
+    # --- PLC ---
+    ".st": "Structured Text",
+    ".plc": "Structured Text",
 }
 
 # 拡張子ベースの強力な除外リスト（ノイズ除去）
